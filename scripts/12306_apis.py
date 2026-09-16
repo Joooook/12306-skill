@@ -23,7 +23,11 @@ VERSION = "0.1.0"
 API_BASE = "https://kyfw.12306.cn"
 SEARCH_API_BASE = "https://search.12306.cn"
 WEB_URL = "https://www.12306.cn/index/"
-LCQUERY_INIT_URL = "https://kyfw.12306.cn/otn/lcQuery/init"
+LCQUERY_PATH_URLS = [
+    "https://kyfw.12306.cn/otn/leftTicket/init",
+    "https://kyfw.12306.cn/otn/lcQuery/init",
+]
+DEFAULT_LCQUERY_PATH = "/lcquery/queryG"
 
 MISSING_STATIONS = [{"station_id":"@cdd","station_name":"成  都东","station_code":"WEI","station_pinyin":"chengdudong","station_short":"cdd","station_index":"","code":"1707","city":"成都","r1":"","r2":""}]
 
@@ -369,45 +373,84 @@ def make_12306_request(url: str, scheme: dict[str, str] | None = None, cookies: 
 def get_stations() -> dict[str, dict[str, str]]:
     html = make_12306_request(WEB_URL, return_text=True)
     if html is None or not isinstance(html, str): raise RuntimeError("Error: get 12306 web page failed.")
-    match = re.search(r"\./script/core/common/station_name.+?\.js", html)
-    if not match: raise RuntimeError("Error: get station name js file failed.")
-    station_js = make_12306_request(WEB_URL + match.group(0)[1:], return_text=True)
-    if station_js is None or not isinstance(station_js, str): raise RuntimeError("Error: get station name js file failed.")
-    raw_match = re.search(r"station_names\s*=\s*'([^']+)'", station_js)
-    if not raw_match: raise RuntimeError("Error: parse station names failed.")
-    stations_data = parse_stations_data(raw_match.group(1))
-    for station in MISSING_STATIONS:
-        if station["station_code"] not in stations_data: stations_data[station["station_code"]] = station
-    return stations_data
+    candidates = re.findall(r"src=[\"'](\./[^\"']*station_name[^\"']*\.js)", html)
+    if not candidates: raise RuntimeError("Error: get station name js file failed.")
+    for candidate in candidates:
+        station_js = make_12306_request(WEB_URL + candidate[2:], return_text=True)
+        if not isinstance(station_js, str):
+            continue
+        raw_match = re.search(r"station_names\s*=\s*'([^']+)'", station_js)
+        if not raw_match:
+            continue
+        stations_data = parse_stations_data(raw_match.group(1))
+        for station in MISSING_STATIONS:
+            if station["station_code"] not in stations_data: stations_data[station["station_code"]] = station
+        return stations_data
+    raise RuntimeError("Error: get station name js file failed.")
 
 
 def get_lc_query_path() -> str:
-    html = make_12306_request(LCQUERY_INIT_URL, return_text=True)
-    if html is None or not isinstance(html, str): raise RuntimeError("Error: get 12306 web page failed.")
-    match = re.search(r" var lc_search_url = '(.+?)'", html)
-    if not match: raise RuntimeError("Error: get station name js file failed.")
-    return match.group(1)
+    for url in LCQUERY_PATH_URLS:
+        html = make_12306_request(url, return_text=True)
+        if not isinstance(html, str):
+            continue
+        match = re.search(r"var\s+lc_search_url\s*=\s*[\"']([^\"']+)[\"']", html)
+        if match:
+            return match.group(1)
+    raise RuntimeError("Error: get lc_search_url failed.")
+
+
+def _load_cache(path: str) -> str | None:
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return None
+
+
+def _write_cache(path: str, content: str) -> None:
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception as error:
+        print(f"Warning: write cache {path} failed: {error}", file=sys.stderr)
 
 
 def init() -> None:
     global STATIONS, CITY_STATIONS, CITY_CODES, NAME_STATIONS, LCQUERY_PATH
     lcquery_path_cache_file = os.path.join(__file__, "..", "lcquery_path")
-    if os.path.exists(lcquery_path_cache_file) and os.path.getmtime(lcquery_path_cache_file) > time.time() - 86400: # 缓存一天
-        with open(lcquery_path_cache_file, "r", encoding="utf-8") as f:
-            LCQUERY_PATH = f.read()
+    cached_lcquery_path = (_load_cache(lcquery_path_cache_file) or "").strip() or None
+    if cached_lcquery_path and os.path.getmtime(lcquery_path_cache_file) > time.time() - 86400: # 缓存一天
+        LCQUERY_PATH = cached_lcquery_path
     else:
-        LCQUERY_PATH = get_lc_query_path()
-        with open(lcquery_path_cache_file, "w", encoding="utf-8") as f:
-            f.write(LCQUERY_PATH)
-    
+        try:
+            LCQUERY_PATH = get_lc_query_path()
+            _write_cache(lcquery_path_cache_file, LCQUERY_PATH)
+        except Exception as error:
+            print(f"Warning: refresh lcquery path failed, fallback used: {error}", file=sys.stderr)
+            LCQUERY_PATH = cached_lcquery_path or DEFAULT_LCQUERY_PATH
+
     stations_cache_file = os.path.join(__file__, "..", "stations.json")
-    if os.path.exists(stations_cache_file) and os.path.getmtime(stations_cache_file) > time.time() - 86400: # 缓存一天
-        with open(stations_cache_file, "r", encoding="utf-8") as f:
-            STATIONS = json.load(f)
+    cached_stations = None
+    cached_stations_raw = _load_cache(stations_cache_file)
+    if cached_stations_raw:
+        try:
+            cached_stations = json.loads(cached_stations_raw)
+        except Exception:
+            cached_stations = None
+    if cached_stations and os.path.getmtime(stations_cache_file) > time.time() - 86400: # 缓存一天
+        STATIONS = cached_stations
     else:
-        STATIONS = get_stations()
-        with open(stations_cache_file, "w", encoding="utf-8") as f:
-            json.dump(STATIONS, f, ensure_ascii=False)
+        try:
+            STATIONS = get_stations()
+            _write_cache(stations_cache_file, json.dumps(STATIONS, ensure_ascii=False))
+        except Exception as error:
+            if not cached_stations:
+                raise
+            print(f"Warning: refresh stations failed, stale cache used: {error}", file=sys.stderr)
+            STATIONS = cached_stations
     city_stations: dict[str, list[dict[str, str]]] = {}
     for station in STATIONS.values():
         city = station.get("city", "")
