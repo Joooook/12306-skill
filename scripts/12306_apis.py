@@ -25,6 +25,16 @@ SEARCH_API_BASE = "https://search.12306.cn"
 WEB_URL = "https://www.12306.cn/index/"
 LCQUERY_INIT_URL = "https://kyfw.12306.cn/otn/lcQuery/init"
 
+# 中转查询的接口路径。
+#
+# 为什么要有兜底值：路径本来是从 lcQuery/init 页面里抓的，但该页面
+# 现在 302 跳登录页（需要会话），抓不到。不过实测**查询接口本身不需要登录** ——
+# 关键是路径里**没有 `/otn/` 前缀**：
+#     https://kyfw.12306.cn/lcquery/queryG   -> 200 有数据
+#     https://kyfw.12306.cn/otn/lcquery/queryG -> 302 要登录
+# 所以拿页面上的值直接当兜底即可。页面给出的是 `lc_search_url = '/lcquery/queryG'`。
+LCQUERY_PATH_FALLBACK = "/lcquery/queryG"
+
 MISSING_STATIONS = [{"station_id":"@cdd","station_name":"成  都东","station_code":"WEI","station_pinyin":"chengdudong","station_short":"cdd","station_index":"","code":"1707","city":"成都","r1":"","r2":""}]
 
 TICKET_DATA_KEYS = ["secret_Sstr","button_text_info","train_no","station_train_code","start_station_telecode","end_station_telecode","from_station_telecode","to_station_telecode","start_time","arrive_time","lishi","canWebBuy","yp_info","start_train_date","train_seat_feature","location_code","from_station_no","to_station_no","is_support_card","controlled_train_flag","gg_num","gr_num","qt_num","rw_num","rz_num","tz_num","wz_num","yb_num","yw_num","yz_num","ze_num","zy_num","swz_num","srrb_num","yp_ex","seat_types","exchange_train_flag","houbu_train_flag","houbu_seat_limit","yp_info_new","40","41","42","43","44","45","dw_flag","47","stopcheckTime","country_flag","local_arrive_time","local_start_time","52","bed_level_info","seat_discount_info","sale_time","56"]
@@ -120,9 +130,18 @@ def parse_tickets_info(tickets_data: list[dict[str, Any]], map: dict[str, str]) 
     for ticket in tickets_data:
         prices = extract_prices(ticket.get("yp_info_new", ""), ticket.get("seat_discount_info", ""), ticket)
         dw_flag = extract_dw_flags(ticket.get("dw_flag", ""))
+        # 12306 存在 start_time = "24:00" 的记录（边界数据，表示次日零点）。
+        # 直接 replace(hour=24) 会抛 ValueError: hour must be in 0..23，
+        # 让整条线路的查询全部失败 —— 之前只有少数线路会踩到，很难发现。
         start_hours, start_minutes = [int(x) for x in ticket["start_time"].split(":")]
+        day_offset = 0
+        if start_hours >= 24:
+            day_offset, start_hours = divmod(start_hours, 24)
         duration_hours, duration_minutes = [int(x) for x in ticket["lishi"].split(":")]
-        start_date = _parse_start_train_date(ticket["start_train_date"]).replace(hour=start_hours, minute=start_minutes)
+        start_date = _parse_start_train_date(ticket["start_train_date"]).replace(
+            hour=start_hours, minute=start_minutes)
+        if day_offset:
+            start_date = start_date + timedelta(days=day_offset)
         arrive_date = start_date + timedelta(hours=duration_hours, minutes=duration_minutes)
         result.append({
             "train_no": ticket.get("train_no"),
@@ -137,7 +156,20 @@ def parse_tickets_info(tickets_data: list[dict[str, Any]], map: dict[str, str]) 
             "from_station_telecode": ticket.get("from_station_telecode"),
             "to_station_telecode": ticket.get("to_station_telecode"),
             "prices": prices,
-            "dw_flag": dw_flag
+            "dw_flag": dw_flag,
+            # 起售信息：未开售时余票字段全是 "*"，光看票量会误判成"无票"。
+            # 起售时刻按出发站定，各站不同（北京丰台 08:00 / 北京南 12:45）。
+            "sale_time": ticket.get("sale_time", ""),
+            "canWebBuy": ticket.get("canWebBuy", ""),
+            "button_text_info": ticket.get("button_text_info", ""),
+            # 候补能力。字段语义与实测依据见 describe_houbu_state() 的注释。
+            "houbu_train_flag": ticket.get("houbu_train_flag", ""),
+            "houbu_seat_limit": ticket.get("houbu_seat_limit", ""),
+            "seat_types": ticket.get("seat_types", ""),
+            # 到站是否为该车次终到站 —— 用于解释候补不可用的场合。
+            "end_station_telecode": ticket.get("end_station_telecode", ""),
+            "at_final_station": (ticket.get("to_station_telecode") ==
+                                 ticket.get("end_station_telecode")),
         })
     return result
 
@@ -154,12 +186,75 @@ def format_ticket_status(num: str) -> str:
     return f"{num}票"
 
 
+def describe_houbu_state(ticket_info: dict[str, Any], short: bool = False) -> str | None:
+    """把候补字段翻译成人话；该车次不支持候补时返回 None。
+
+    ---------- 字段语义（2026-09-16 实测，非推测）----------
+
+    `houbu_train_flag` 的**实测**语义是「该车次是否存在无票席别」，
+    而**不是**「是否支持候补」：
+
+        '1' = 至少一个席别无票（可能需要候补）
+        '0' = 全部席别有票（无需候补）
+
+    证据（2026-09-16 实测，北京→南昌）：
+        09-19  D135  四个席别全为「有」  → '0'
+        09-19  D137  二等座为「无」      → '1'
+        09-30  全线席别全为「无」        → 全部 '1'
+
+    `houbu_seat_limit` 是**候补队列已满**的席别代码串
+    （J 二等卧 / I 一等卧 / O 二等座），空串 = 没有席别被占满。
+
+    【证据一】字段随队列渐进填充。同一车次 D133（北京→南昌西），跨三天：
+        09-28 → 'J'      仅二等卧满
+        09-29 → 'JI'     二等卧 + 一等卧满
+        09-30 → 'JOI'    再加二等座满
+    静态标签不会逐席别增长，只有真实队列会。
+
+    【证据二】与 App 行为吻合。用户 2026-09-16 在 12306 App 提交候补：
+        D27 / D133 / D139 → 提示「当前车次候补过多」，无法提交 → 字段非空
+        D135 / D137       → 可正常提交                  → 字段为空串
+    两组完全分离。
+
+    ⚠️ 已知未覆盖的边界（不要在输出里对此下断言）：
+      1. 「字段非空 = 整车次不可提交」还是「仅该席别不可提交」未定性；
+         用户实测表现为**整车次**被拦。
+      2. D131（北京→九江）字段为空串，但用户反馈九江方向候补在 App 里是灰的
+         —— 说明前端可能还有本字段未覆盖的其他灰化规则（例如到站非终到站）。
+    因此这里只做**忠实展示**，不据此推断「能不能提交」。真实可否提交
+    以 12306 App 为准。
+    """
+    limit = ticket_info.get("houbu_seat_limit") or ""
+    # flag='0' 实测出现在「全部席别都有票」的车次上，此时没有候补需求 ——
+    # 不输出这一行，保持结果干净。
+    # 但要防御二者的矛盾情形：即便 flag != '1'，只要 limit 非空
+    # （确实存在已满席别）就必须报出来，宁可多显示也不漏报。
+    if ticket_info.get("houbu_train_flag") != "1" and not limit:
+        return None
+    if not limit:
+        return "-" if short else "🎫 候补：可提交"
+    names = [SEAT_TYPES.get(c, {}).get("name", c) for c in limit]
+    if short:
+        return "候补已满(%s)" % "/".join(names)
+    return "⚠️ 候补队列已满：%s" % "、".join(names)
+
+
 def format_tickets_info(tickets_info: list[dict[str, Any]]) -> str:
     if not tickets_info:
         return "没有查询到相关车次信息"
     result = "车次|出发站 -> 到达站|出发时间 -> 到达时间|历时\n"
     for ticket_info in tickets_info:
         info = f"{ticket_info['start_train_code']} {ticket_info['from_station']}(telecode:{ticket_info['from_station_telecode']}) -> {ticket_info['to_station']}(telecode:{ticket_info['to_station_telecode']}) {ticket_info['start_time']} -> {ticket_info['arrive_time']} 历时：{ticket_info['lishi']}"
+        # 未开售的车次，余票字段全是 "*"，光看票量会误判成"无票"。
+        # 实际 12306 在响应里直接给了起售时间（sale_time / button_text_info），
+        # 所以这里把它标出来 —— 起售时刻按**出发站**定，各站不同。
+        sale_time = ticket_info.get("sale_time") or ""
+        if ticket_info.get("canWebBuy") == "IS_TIME_NOT_BUY" and len(sale_time) >= 12:
+            info += (f"\n  ⏰ 尚未开售，起售时间 {sale_time[0:4]}-{sale_time[4:6]}-"
+                     f"{sale_time[6:8]} {sale_time[8:10]}:{sale_time[10:12]}")
+        houbu_note = describe_houbu_state(ticket_info)
+        if houbu_note:
+            info += f"\n  {houbu_note}"
         for price in ticket_info["prices"]:
             info += f"\n- {price['seat_name']}: {format_ticket_status(price.get('num', ''))} {price['price']}元"
         result += info + "\n"
@@ -169,13 +264,13 @@ def format_tickets_info(tickets_info: list[dict[str, Any]]) -> str:
 def format_tickets_info_csv(tickets_info: list[dict[str, Any]]) -> str:
     if not tickets_info:
         return "没有查询到相关车次信息"
-    result = "车次,出发站,到达站,出发时间,到达时间,历时,票价,特色标签\n"
+    result = "车次,出发站,到达站,出发时间,到达时间,历时,票价,特色标签,候补\n"
     for ticket_info in tickets_info:
         line = f"{ticket_info['start_train_code']},{ticket_info['from_station']}(telecode:{ticket_info['from_station_telecode']}),{ticket_info['to_station']}(telecode:{ticket_info['to_station_telecode']}),{ticket_info['start_time']},{ticket_info['arrive_time']},{ticket_info['lishi']},["
         for price in ticket_info["prices"]:
             line += f"{price['seat_name']}: {format_ticket_status(str(price.get('num', '')))}{price['price']}元,"
         tags = "/" if not ticket_info["dw_flag"] else "&".join(ticket_info["dw_flag"])
-        line += f"],{tags}"
+        line += f"],{tags},{describe_houbu_state(ticket_info, short=True) or '-'}"
         result += line + "\n"
     return result
 
@@ -382,17 +477,45 @@ def get_stations() -> dict[str, dict[str, str]]:
 
 
 def get_lc_query_path() -> str:
-    html = make_12306_request(LCQUERY_INIT_URL, return_text=True)
-    if html is None or not isinstance(html, str): raise RuntimeError("Error: get 12306 web page failed.")
-    match = re.search(r" var lc_search_url = '(.+?)'", html)
-    if not match: raise RuntimeError("Error: get station name js file failed.")
-    return match.group(1)
+    """
+    取中转查询的接口路径。
+
+    先尝试从 lcQuery/init 页面抓；抓不到就退回常量。
+
+    注意两个曾误导排查的点：
+      1. 本函数原本失败时抛的是 `"get station name js file failed"` ——
+         实际与站点名数据完全无关，白白把人引到错误方向。
+      2. 原本的正则要求 `" var lc_search_url = '...'"`（带 "var" 和空格），
+         而页面里其实是 `lc_search_url = '...'`。正则放宽后两种都能匹配。
+    """
+    try:
+        html = make_12306_request(LCQUERY_INIT_URL, return_text=True)
+        if isinstance(html, str) and html:
+            for pattern in (r"lc_search_url\s*=\s*'([^']+)'",
+                            r'lc_search_url\s*=\s*"([^"]+)"'):
+                match = re.search(pattern, html)
+                if match:
+                    return match.group(1)
+    except Exception:
+        pass
+    # 页面拿不到（302 跳登录）时用兜底路径 —— 实测该路径查询无需登录
+    return LCQUERY_PATH_FALLBACK
 
 
-def init() -> None:
+def init(need_lcquery: bool = False) -> None:
+    """
+    初始化。
+
+    need_lcquery 只在调用中转查询（get-interline-tickets）时传 True。
+    LCQUERY_PATH 仅该功能使用，而 12306 于 2026 年改版后 lcQuery/init
+    会 302 跳登录页 —— 原本无条件取它，导致**所有**工具都报错，
+    连根本不需要它的直达余票查询也用不了。
+    """
     global STATIONS, CITY_STATIONS, CITY_CODES, NAME_STATIONS, LCQUERY_PATH
-    lcquery_path_cache_file = os.path.join(__file__, "..", "lcquery_path")
-    if os.path.exists(lcquery_path_cache_file) and os.path.getmtime(lcquery_path_cache_file) > time.time() - 86400: # 缓存一天
+    lcquery_path_cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lcquery_path")
+    if not need_lcquery:
+        LCQUERY_PATH = ""
+    elif os.path.exists(lcquery_path_cache_file) and os.path.getmtime(lcquery_path_cache_file) > time.time() - 86400: # 缓存一天
         with open(lcquery_path_cache_file, "r", encoding="utf-8") as f:
             LCQUERY_PATH = f.read()
     else:
@@ -400,7 +523,7 @@ def init() -> None:
         with open(lcquery_path_cache_file, "w", encoding="utf-8") as f:
             f.write(LCQUERY_PATH)
     
-    stations_cache_file = os.path.join(__file__, "..", "stations.json")
+    stations_cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stations.json")
     if os.path.exists(stations_cache_file) and os.path.getmtime(stations_cache_file) > time.time() - 86400: # 缓存一天
         with open(stations_cache_file, "r", encoding="utf-8") as f:
             STATIONS = json.load(f)
@@ -430,12 +553,12 @@ def tool_get_current_date() -> str:
 
 def tool_refresh_cache() -> str:
     """手动刷新站点与查询路径缓存，强制重新执行一次初始化流程。"""
-    lcquery_path_cache_file = os.path.join(__file__, "..", "lcquery_path")
+    lcquery_path_cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lcquery_path")
     LCQUERY_PATH = get_lc_query_path()
     with open(lcquery_path_cache_file, "w", encoding="utf-8") as f:
         f.write(LCQUERY_PATH)
     
-    stations_cache_file = os.path.join(__file__, "..", "stations.json")
+    stations_cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stations.json")
     STATIONS = get_stations()
     with open(stations_cache_file, "w", encoding="utf-8") as f:
         json.dump(STATIONS, f, ensure_ascii=False)
@@ -653,7 +776,8 @@ def list_tools() -> dict[str, Any]:
 
 
 def run_tool(tool_name: Literal["list-tools", "refresh-cache", "get-current-date", "get-stations-code-in-city", "get-station-code-of-citys", "get-station-code-by-names", "get-station-by-telecode", "get-tickets", "get-interline-tickets", "get-train-route-stations"], **kwargs: Any) -> str:
-    init()
+    # 只有中转查询需要 LCQUERY_PATH，其余工具不该因为取不到它而失败
+    init(need_lcquery=(tool_name == "get-interline-tickets"))
     if tool_name == "list-tools":
         return json.dumps(list_tools(), ensure_ascii=False)
     if tool_name == "refresh-cache":

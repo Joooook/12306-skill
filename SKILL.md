@@ -1,106 +1,254 @@
 ---
-name: 12306-skill
-description: 使用 Python 脚本调用 12306 接口，查询车票、车站和列车信息。
+name: 12306
+description: 查询 12306 实时火车票信息。当用户询问火车票余票、**候补状态**、车次时刻表、某车次的经停站/途径城市、车站编码、出发到达时间、票价，或做出行方案对比时使用。触发词：12306、火车票、高铁票、动车、余票、车次、经停、途径城市、中转、车站、时刻表、票价、出行安排、候补、候补队列、抢票。
 ---
 
-# 12306 Skill
+# 12306 车票查询
 
-## Quick Start
+实时查询 12306 的余票、车次、经停站信息。纯 Python（依赖 `requests`），
+无需登录、无需 Cookie，只读查询。
 
-- 先进入目录：`12306-skill`
-- 查看可用工具：`python scripts/12306_apis.py list-tools`
-- 调用工具：`python scripts/12306_apis.py <tool-name> [--arg value ...]`
+> 上游项目：[Joooook/12306-skill](https://github.com/Joooook/12306-skill)（见 `upstream-README.md`）。
+> 本地版本修了上游 **5 处**致命问题（见「对上游的修复」），并新增**候补状态**显示。
 
-## Tool Commands
+## 快速开始
 
-- `refresh-cache`: 刷新本地缓存（站点数据与 lcquery 路径）,非特殊情况不调用。
-- `get-current-date`: 获取当前日期，以上海时区（Asia/Shanghai, UTC+8）为准，返回格式 `yyyy-MM-dd`。主要用于解析相对日期。
-- `get-stations-code-in-city`: 通过中文城市名查询该城市所有火车站的名称及其对应的 `station_code`。
-- `get-station-code-of-citys`: 通过中文城市名查询代表该城市的 `station_code`。
-- `get-station-code-by-names`: 通过具体中文车站名查询其 `station_code` 和车站名。
-- `get-station-by-telecode`: 通过 `station_telecode` 查询车站详细信息（名称、拼音、所属城市等），常用于补充查询与调试。
-- `get-tickets`: 查询 12306 直达余票信息。
-- `get-interline-tickets`: 查询 12306 中转余票信息。
-- `get-train-route-stations`: 查询特定车次在指定日期的经停站、到发时间和停留信息。
-
-## 函数调用参数说明
-
-### `refresh-cache`
-
-- 无参数。
-
-### `get-current-date`
-
-- 无参数。
-
-### `get-stations-code-in-city`
-
-- `city` (必填, string): 城市名，例如 `北京`。
-
-### `get-station-code-of-citys`
-
-- `citys` (必填, string): 一个或多个城市名，使用 `|` 分隔，例如 `北京|上海`。
-
-### `get-station-code-by-names`
-
-- `station_names` (必填, string): 一个或多个车站名，使用 `|` 分隔，例如 `北京南|上海虹桥`。
-
-### `get-station-by-telecode`
-
-- `station_telecode` (必填, string): 车站电报码，例如 `BJP`。
-
-### `get-tickets`
-
-- `date` (必填, string): 出发日期，格式 `YYYY-MM-DD`，且不能早于当天。
-- `from_station` (必填, string): 出发站，可传站名（如 `北京南`）或电报码（如 `VNP`）。
-- `to_station` (必填, string): 到达站，可传站名或电报码。
-- `train_filter_flags` (可选, string, 默认 `""`): 车次过滤标记，可组合（如 `GD`）。支持：
-  - `G` 高铁/城际
-  - `D` 动车
-  - `Z` 直达
-  - `T` 特快
-  - `K` 快速
-  - `O` 其他
-  - `F` 复兴号
-  - `S` 智能动车组
-- `earliest_start_time` (可选, int, 默认 `0`): 最早发车小时（含），范围建议 `0-23`。
-- `latest_start_time` (可选, int, 默认 `24`): 最晚发车小时（不含），范围建议 `1-24`。
-- `sort_flag` (可选, string, 默认 `""`): 排序字段，可选 `startTime` / `arriveTime` / `duration`。
-- `sort_reverse` (可选, bool, 默认 `false`): 是否倒序。
-- `limited_num` (可选, int, 默认 `0`): 返回数量限制，`0` 表示不限制。
-- `format` (可选, string, 默认 `text`): 输出格式，可选 `text` / `csv` / `json`。
-
-### `get-interline-tickets`
-
-- `date` (必填, string): 出发日期，格式 `YYYY-MM-DD`，且不能早于当天。
-- `from_station` (必填, string): 出发站，站名或电报码。
-- `to_station` (必填, string): 到达站，站名或电报码。
-- `middle_station` (可选, string, 默认 `""`): 指定中转站，站名或电报码；留空表示自动推荐中转站。
-- `show_wz` (可选, bool, 默认 `false`): 是否显示无座方案。
-- `train_filter_flags` (可选, string, 默认 `""`): 过滤规则同 `get-tickets`。
-- `earliest_start_time` (可选, int, 默认 `0`): 最早发车小时（含）。
-- `latest_start_time` (可选, int, 默认 `24`): 最晚发车小时（不含）。
-- `sort_flag` (可选, string, 默认 `""`): 排序字段，可选 `startTime` / `arriveTime` / `duration`。
-- `sort_reverse` (可选, bool, 默认 `false`): 是否倒序。
-- `limited_num` (可选, int, 默认 `10`): 返回数量限制。
-- `format` (可选, string, 默认 `text`): 输出格式，可选 `text` / `json`。
-
-### `get-train-route-stations`
-
-- `train_code` (必填, string): 车次号，例如 `G1033`。
-- `depart_date` (必填, string): 运行日期，格式 `YYYY-MM-DD`。
-- `format` (可选, string, 默认 `text`): 输出格式，可选 `text` / `json`。
-
-## Args Examples
+**一律用绝对路径调用**，不要 `cd` 到某个目录：
 
 ```bash
-python scripts/12306_apis.py get-current-date
-python scripts/12306_apis.py get-stations-code-in-city --city "北京"
-python scripts/12306_apis.py get-tickets --date "2026-03-09" --from_station "北京" --to_station "上海" --train_filter_flags "G" --format text
-python scripts/12306_apis.py get-interline-tickets --date "2026-03-09" --from_station "成都" --to_station "广州" --limited_num 5
-python scripts/12306_apis.py get-train-route-stations --train_code "G1033" --depart_date "2026-03-09"
+python3 /var/minis/skills/12306/scripts/12306_apis.py <tool-name> [--arg value ...]
 ```
 
-## Execution Rules
+先看有哪些工具：
 
-- 请尽量使用接口的筛选功能，来筛选必要的信息，以此节省Token。
+```bash
+python3 /var/minis/skills/12306/scripts/12306_apis.py list-tools
+```
+
+## 常用命令
+
+```bash
+S=/var/minis/skills/12306/scripts/12306_apis.py
+
+# 今天日期（上海时区，用于解析"明天""后天"）
+python3 $S get-current-date
+
+# 城市 → 车站编码
+python3 $S get-stations-code-in-city --city "北京"
+
+# 查余票（最常用）
+python3 $S get-tickets --date "2026-09-16" --from_station "北京" --to_station "上海" \
+  --train_filter_flags "G" --limited_num 5
+
+# 某车次的经停站 / 途径城市
+python3 $S get-train-route-stations --train_code "G1" --depart_date "2026-09-16"
+```
+
+## 工具清单
+
+| 工具 | 用途 | 状态 |
+|---|---|---|
+| `get-current-date` | 今天日期（Asia/Shanghai） | ✅ |
+| `get-stations-code-in-city` | 城市下所有车站及编码 | ✅ |
+| `get-station-code-of-citys` | 城市代表站编码 | ✅ |
+| `get-station-code-by-names` | 车站名 → 编码 | ✅ |
+| `get-station-by-telecode` | 编码 → 车站详情 | ✅ |
+| `get-tickets` | **直达余票**（含筛选/排序/限数） | ✅ |
+| `get-train-route-stations` | **车次经停站**（途径城市、到发时间） | ✅ |
+| `get-interline-tickets` | **中转余票**（自动推荐换乘站） | ✅ |
+| `refresh-cache` | 刷新站点缓存 | 非必要不用 |
+
+**9/9 全部可用，且都不需要登录。**
+
+### 中转查询有个好用的特性
+
+它不只给方案，还会标注**换乘类型**和**等待时间**，这对判断可行性很关键：
+
+```
+2026-09-16 07:55 -> 09-17 15:36 | 北京西 -> 兰州西-兰州 -> 拉萨 | 换站换乘 | 1小时58分钟 | 31:41
+2026-09-16 06:09 -> 09-17 15:36 | 北京北 -> 西宁 -> 拉萨        | 同站换乘 | 52分钟     | 33:27
+```
+
+- **同站换乘**（不出站）远优于**换站换乘**（要转场，还要重新安检）
+- `指定换乘站` 参数（`--middle_station`）可以锁定你想要的换乘城市
+
+## 关键参数（get-tickets）
+
+| 参数 | 说明 |
+|---|---|
+| `date` | **必填**，`YYYY-MM-DD`，不能早于当天 |
+| `from_station` / `to_station` | **必填**，站名（`北京南`）或电报码（`VNP`） |
+| `train_filter_flags` | 车次类型，可组合：`G` 高铁/城际、`D` 动车、`Z` 直达、`T` 特快、`K` 快速、`F` 复兴号、`S` 智能动车组、`O` 其他 |
+| `earliest_start_time` / `latest_start_time` | 发车小时范围（默认 0–24，左闭右开） |
+| `sort_flag` | 排序：`startTime` / `arriveTime` / `duration` |
+| `sort_reverse` | 倒序 |
+| `limited_num` | 返回条数，`0` = 不限 |
+| `format` | `text` / `csv` / `json` |
+
+## 省 token 的做法
+
+1. **优先用 `from_station` 传城市名**而不是车站名 —— 传城市会自动选代表站。
+2. **一定带上 `--limited_num`**，否则热门线路会返回几十条车次。
+3. **用 `train_filter_flags` 收窄**，比如只要高铁就传 `G`。
+4. 需要机器处理时用 `--format json`，需要人读时用 `text`。
+
+## 候补状态（2026-09 新增）
+
+`get-tickets` 每趟车下面会多一行候补状态：
+
+```
+D135 北京丰台 -> 南昌 19:48 -> 07:49 历时：12:01
+  🎫 候补：可提交
+- 二等卧: 无票 407.0元
+- 一等卧: 无票 580.0元
+
+D27 北京丰台 -> 南昌西 19:54 -> 07:52 历时：11:58
+  ⚠️ 候补队列已满：二等卧、二等座、一等卧
+- 二等卧: 无票 409.0元
+```
+
+| 输出 | 来源字段 | 含义 |
+|---|---|---|
+| `🎫 候补：可提交` | `houbu_seat_limit` 为空串 | 没有席别被占满 |
+| `⚠️ 候补队列已满：X、Y` | 非空串 | X / Y 的候补队列已满 |
+
+席别代码：`J` 二等卧、`I` 一等卧、`O` 二等座（映射见 `SEAT_TYPES`）。
+`--format json` 额外给出 `houbu_train_flag` / `houbu_seat_limit` / `seat_types` /
+`at_final_station`；`--format csv` 末尾多了「候补」列。
+
+**全部席别都有票时不输出这一行** —— 此时没有候补需求，结果保持干净。
+门控字段 `houbu_train_flag` 的实测语义是「该车次**是否存在无票席别**」，
+**不是**「是否支持候补」：
+
+| 实测（2026-09-16，北京→南昌） | flag |
+|---|---|
+| 09-19 D135 四个席别全为「有」 | `'0'` |
+| 09-19 D137 二等座为「无」 | `'1'` |
+| 09-30 全线席别全为「无」 | 全部 `'1'` |
+
+（防御性处理：若 flag 异常为 `'0'` 但 `houbu_seat_limit` 非空，仍会输出 ——
+宁可多显示，不漏报。）
+
+### 字段是怎么验证的
+
+不是猜的，两条独立证据：
+
+1. **字段随队列渐进填充** —— 同一车次 D133 跨三天：
+   `09-28 → 'J'` → `09-29 → 'JI'` → `09-30 → 'JOI'`。
+   静态标签不会逐席别增长。
+2. **与 App 行为吻合** —— 用户在 12306 App 提交候补时，
+   D27 / D133 / D139 提示「当前车次候补过多」提交不了（字段非空），
+   D135 / D137 可正常提交（字段为空串）。两组完全分离。
+
+### ⚠️ 已知边界：不要在输出里断言"能不能提交"
+
+1. 字段非空时，用户实测**整个车次**无法提交（不只是该席别）——
+   是「车次级」还是「席别级」未定性。
+2. **到站为非终到站时该字段可能失真**：同一趟 D135、同一时刻，
+   到南昌（终到站）为空串，到九江（途经站）为 `JOI`。
+   但 D131 / D59（到九江、同样非终到）却为空串，与用户在 App 看到的
+   「九江候补灰」不符 → **前端还有本字段未覆盖的灰化规则**（待验证）。
+
+**结论：这里只做忠实展示。真实可否提交，以 12306 App 为准。**
+
+### 实用推论
+
+- **想买途经站区间时，改成查到终到站**看候补 —— 状态通常更宽松。
+  例：买不到「北京→九江」，可候补「北京→南昌」，D135 在九江 06:41 停车，
+  提前下车即可。
+
+### 「中途站上车」是官方允许的（2026-09-21 修正）
+
+**官方原文**（12306 铁路客户服务中心，四个官方来源文字一致）：
+
+> **购票后，可以在中途站上车吗？**
+> 按照车票票面指定的日期、车次，**可以在中途站上车，但未乘区间的票价不退**。
+
+| 来源 | 网址 |
+|---|---|
+| 铁路客户服务中心 | `www.12306.cn/mormhweb/tlxx/` |
+| 12306 公告 | `kyfw.12306.cn/otn/gonggao/enterAndExit.html` |
+| 中国国家铁路集团 | `wap.china-railway.com.cn/zyyw/lkys/fwgd` |
+| 12306 帮助中心 | `help.12306.cn/cms/answer/` |
+
+**现行规则中没有任何「1 小时」「铺位可另行出售」的表述。**
+
+#### ⚠️ 曾经的错误引用（保留证据，勿再犯）
+
+一度写过「12306 规定旅客未在票面发站上车，列车长可将铺位另行出售
+（通常开车后 1 小时）」，并据此劝退「买长坐短」。**该说法不成立**：
+
+| 项 | 事实 |
+|---|---|
+| 「超过 1 小时可另行出售」 | 出自 **1997 版**规程（铁运〔1997〕101号） |
+| 该条款现状 | **2007 年《铁运〔2007〕53号》修订时删除** |
+| 删除后的原则 | 已售卧铺席位**使用权归购票旅客**，无论是否上车均不再另行出售 |
+
+> 📌 **关于证据强度**：「2007 年删除」这一条只找到二手来源（搜索摘要、论坛），
+> **未拿到 2007 年文件的官方原文**（司法部/交通运输部/国家铁路局链接均 404）。
+> 标为「有较强旁证，但缺一手文件」。
+> 而**现行规则**（可以中途站上车）有四个官方来源直接确认。
+
+**系统层面的旁证**：实名制下，票面席位在票源库中显示为「已售」而非空余，
+**根本打不出第二张票** —— 与「不再另行出售」的规则方向一致。
+
+#### 实操建议
+
+买长坐短（例：买「南昌→北京」，实际在九江上车）**是官方允许的**，
+代价仅是未乘区间（南昌→九江）票款不退。
+
+⚠️ 唯一摩擦在沟通：列车员可能看到「该铺位无人」，需主动说明并出示购票记录。
+这是**经验性建议，未实测**。
+- 候补队列是**渐进填满**的，越早排越有利（D133 从 `'J'` 涨到 `'JOI'` 只用两天）。
+- 12306 **没有"退票查询"接口**，任何平台的"盯退票"本质都是轮询余票字段。
+  且退票释放的票**优先分配给候补队列**，所以候补能排上时，排队比刷余票有效。
+
+## 环境
+
+已装好，无需重复安装：
+
+| 依赖 | 状态 |
+|---|---|
+| `requests` | ✅ 已装（Alpine 包 `py3-requests`） |
+| `tzdata` | ✅ 已装（否则 `get-current-date` 报无时区） |
+| 站点缓存 | `scripts/stations.json`（726KB，缓存 1 天） |
+
+> **rootfs 重置后**需重装：`apk add --no-cache py3-requests tzdata`
+> （`android-*` / `minis-*` 工具也需重启 Minis app 恢复）
+
+## 对上游的修复
+
+上游版本在 2026-09 时**开箱即坏**（所有工具都报错），这里修了 5 处：
+
+1. **`init()` 无容错** —— 它无条件获取 `lc_query_path`，一失败就让
+   **所有**工具报错（包括根本不需要它的直达余票查询）。
+   → 改为按需：只有 `get-interline-tickets` 才去取。
+2. **中转路径取不到**（导致中转查询不可用）—— 路径本来从 `lcQuery/init`
+   页面抓，但该页现在 302 跳登录页。**实测查询接口本身不需要登录**，
+   关键是路径里**没有 `/otn/` 前缀**：
+   ```
+   https://kyfw.12306.cn/lcquery/queryG      -> 200 有数据  ✅
+   https://kyfw.12306.cn/otn/lcquery/queryG  -> 302 要登录  ❌
+   ```
+   → 加常量兜底 `/lcquery/queryG`；同时把正则放宽
+   （页面里是 `lc_search_url = '...'`，原正则却要求前面有 `" var "`）。
+3. **缓存路径把文件当目录** —— `os.path.join(__file__, "..", "stations.json")`
+   拼出 `12306_apis.py/../stations.json`，永远写不进去。
+   → 改为 `os.path.dirname(os.path.abspath(__file__))`（4 处）。
+4. **误导性错误信息** —— `get_lc_query_path()` 失败时抛的是
+   `"get station name js file failed"`，实际与站点数据无关，误导排查方向。
+   → 改为如实描述。
+5. **缺 tzdata 依赖** —— 上游 README 只写了 `requests`，
+   但 `get-current-date` 需要系统时区库。
+
+> 排查时的教训：脚本报错信息会骗人。定位到的办法是**直接 import 模块调内部函数**，
+> 再和 CLI 路径对比 —— 这样才看出"失败的根本不是它说的那个东西"。
+
+## 用之前想一想
+
+这是**只读查询**，查余票不会锁票、不会影响任何账号状态。
+但要注意：**12306 的余票是实时变动的**，查到的"有票"不代表下单时还能买到。
+需要真正购票时，得去官方 App 或 12306 网站操作。
+
+另外 `date` 不能早于当天（脚本会拒绝），也不能查太远的日期
+（12306 只放售 15 天内）。

@@ -63,3 +63,19 @@ python scripts/12306_apis.py get-tickets --date "2026-03-09" --from_station "北
 </a>
 </div>
 
+## 运行时依赖
+
+除 `requests` 外还需要**系统时区库**（`get-current-date` 使用
+`zoneinfo` + `Asia/Shanghai`）：
+
+```bash
+apk add --no-cache py3-requests tzdata     # Alpine
+apt install python3-requests tzdata        # Debian/Ubuntu
+```
+
+缺 tzdata 的表现：`Error: 'No time zone found with key Asia/Shanghai'`
+
+## 关于登录
+
+**所有查询接口都不需要登录。** 中转查询此前失败并非因为需要登录 ——
+是接口路径里没有 `/otn/` 前缀的那个变体不需要登录，而取路径的页面需要会话。
