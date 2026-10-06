@@ -382,16 +382,19 @@ def get_stations() -> dict[str, dict[str, str]]:
 
 
 def get_lc_query_path() -> str:
+    # 2026-10 实测：/otn/lcQuery/init 已 302 跳转到登录页，不再包含 lc_search_url；
+    # 中转查询接口本身仍可用，路径回退到历史上稳定的默认值。
     html = make_12306_request(LCQUERY_INIT_URL, return_text=True)
-    if html is None or not isinstance(html, str): raise RuntimeError("Error: get 12306 web page failed.")
-    match = re.search(r" var lc_search_url = '(.+?)'", html)
-    if not match: raise RuntimeError("Error: get station name js file failed.")
-    return match.group(1)
+    if html is not None and isinstance(html, str):
+        match = re.search(r" var lc_search_url = '(.+?)'", html)
+        if match: return match.group(1)
+    print("Warning: lc_search_url 解析失败，回退到默认路径 /lcquery/queryG", file=sys.stderr)
+    return "/lcquery/queryG"
 
 
 def init() -> None:
     global STATIONS, CITY_STATIONS, CITY_CODES, NAME_STATIONS, LCQUERY_PATH
-    lcquery_path_cache_file = os.path.join(__file__, "..", "lcquery_path")
+    lcquery_path_cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lcquery_path")
     if os.path.exists(lcquery_path_cache_file) and os.path.getmtime(lcquery_path_cache_file) > time.time() - 86400: # 缓存一天
         with open(lcquery_path_cache_file, "r", encoding="utf-8") as f:
             LCQUERY_PATH = f.read()
@@ -400,7 +403,7 @@ def init() -> None:
         with open(lcquery_path_cache_file, "w", encoding="utf-8") as f:
             f.write(LCQUERY_PATH)
     
-    stations_cache_file = os.path.join(__file__, "..", "stations.json")
+    stations_cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stations.json")
     if os.path.exists(stations_cache_file) and os.path.getmtime(stations_cache_file) > time.time() - 86400: # 缓存一天
         with open(stations_cache_file, "r", encoding="utf-8") as f:
             STATIONS = json.load(f)
@@ -430,12 +433,12 @@ def tool_get_current_date() -> str:
 
 def tool_refresh_cache() -> str:
     """手动刷新站点与查询路径缓存，强制重新执行一次初始化流程。"""
-    lcquery_path_cache_file = os.path.join(__file__, "..", "lcquery_path")
+    lcquery_path_cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lcquery_path")
     LCQUERY_PATH = get_lc_query_path()
     with open(lcquery_path_cache_file, "w", encoding="utf-8") as f:
         f.write(LCQUERY_PATH)
     
-    stations_cache_file = os.path.join(__file__, "..", "stations.json")
+    stations_cache_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stations.json")
     STATIONS = get_stations()
     with open(stations_cache_file, "w", encoding="utf-8") as f:
         json.dump(STATIONS, f, ensure_ascii=False)
